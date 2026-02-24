@@ -89,23 +89,32 @@ interface DrawingOverlayProps {
   fields: Field[];
   currentPage: number;
   onAddField: (field: Field) => void;
-  selectedFieldId: string | null;
-  onSelectField: (id: string | null) => void;
-  onUpdateField: (id: string, updates: Partial<Field>) => void;
+  selectedFieldIds: string[];
+  onSelectFields: (ids: string[]) => void;
+  onUpdateFields: (updates: { id: string; x?: number; y?: number }[]) => void;
 }
 
 function DrawingOverlay({
   fields,
   currentPage,
   onAddField,
-  selectedFieldId,
-  onSelectField,
-  onUpdateField,
+  selectedFieldIds,
+  onSelectFields,
+  onUpdateFields,
 }: DrawingOverlayProps) {
   const overlayRef = useRef<HTMLDivElement>(null);
   const [isDrawing, setIsDrawing] = useState(false);
+  const [isLasso, setIsLasso] = useState(false);
   const [startPos, setStartPos] = useState({ x: 0, y: 0 });
   const [currentPos, setCurrentPos] = useState({ x: 0, y: 0 });
+
+  const [dragState, setDragState] = useState<{
+    startX: number;
+    startY: number;
+    initialPositions: { id: string; x: number; y: number; width: number; height: number }[];
+    mainFieldId: string;
+  } | null>(null);
+  const [snapLineY, setSnapLineY] = useState<number | null>(null);
 
   const handleMouseDown = (e: React.MouseEvent) => {
     if (e.target !== overlayRef.current) return;
@@ -114,37 +123,125 @@ function DrawingOverlay({
     const y = ((e.clientY - rect.top) / rect.height) * 100;
     setStartPos({ x, y });
     setCurrentPos({ x, y });
-    setIsDrawing(true);
-    onSelectField(null);
+    
+    // If Shift is held, it's always Lasso. Otherwise, if no field is under, it's Drawing or Lasso.
+    // Let's make it: Click + Drag on empty space = Lasso. 
+    // We'll decide between Drawing and Lasso based on a toggle or just use Lasso as default for empty space drag.
+    // Actually, the user wants to "select multiple", so Lasso is better for empty space.
+    setIsLasso(true);
+    if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
+      onSelectFields([]);
+    }
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
-    if (!isDrawing) return;
-    const rect = overlayRef.current!.getBoundingClientRect();
-    const x = Math.max(0, Math.min(100, ((e.clientX - rect.left) / rect.width) * 100));
-    const y = Math.max(0, Math.min(100, ((e.clientY - rect.top) / rect.height) * 100));
-    setCurrentPos({ x, y });
+    const rect = overlayRef.current?.getBoundingClientRect();
+    if (!rect) return;
+
+    if (dragState) {
+      const deltaX = ((e.clientX - dragState.startX) / rect.width) * 100;
+      const deltaY = ((e.clientY - dragState.startY) / rect.height) * 100;
+
+      const updates: { id: string; x: number; y: number }[] = [];
+      const mainFieldInitial = dragState.initialPositions.find(p => p.id === dragState.mainFieldId)!;
+      let mainNewY = mainFieldInitial.y + deltaY;
+      
+      const snapMarginYPct = (5 / rect.height) * 100;
+      let snapped = false;
+      
+      for (const otherField of fields) {
+        if (!selectedFieldIds.includes(otherField.id) && otherField.page === currentPage) {
+          if (Math.abs(mainNewY - otherField.y) <= snapMarginYPct) {
+            mainNewY = otherField.y;
+            setSnapLineY(mainNewY);
+            snapped = true;
+            break;
+          }
+        }
+      }
+      
+      if (!snapped) setSnapLineY(null);
+
+      const finalDeltaY = mainNewY - mainFieldInitial.y;
+
+      dragState.initialPositions.forEach(pos => {
+        let newX = pos.x + deltaX;
+        let newY = pos.y + finalDeltaY;
+
+        newX = Math.max(0, Math.min(100 - pos.width, newX));
+        newY = Math.max(0, Math.min(100 - pos.height, newY));
+
+        updates.push({ id: pos.id, x: newX, y: newY });
+      });
+
+      onUpdateFields(updates);
+      return;
+    }
+
+    if (isLasso || isDrawing) {
+      const x = Math.max(0, Math.min(100, ((e.clientX - rect.left) / rect.width) * 100));
+      const y = Math.max(0, Math.min(100, ((e.clientY - rect.top) / rect.height) * 100));
+      setCurrentPos({ x, y });
+
+      if (isLasso) {
+        // Update selection in real-time for Lasso
+        const lx = Math.min(startPos.x, x);
+        const ly = Math.min(startPos.y, y);
+        const lw = Math.abs(x - startPos.x);
+        const lh = Math.abs(y - startPos.y);
+
+        const newlySelected = fields
+          .filter(f => f.page === currentPage)
+          .filter(f => {
+            // Check if field is inside lasso rect
+            return (
+              f.x >= lx &&
+              f.y >= ly &&
+              f.x + f.width <= lx + lw &&
+              f.y + f.height <= ly + lh
+            );
+          })
+          .map(f => f.id);
+        
+        // If shift is held, we should probably add to existing selection, but for simplicity let's just set it
+        onSelectFields(newlySelected);
+      }
+    }
   };
 
   const handleMouseUp = () => {
-    if (!isDrawing) return;
-    setIsDrawing(false);
+    if (dragState) {
+      setDragState(null);
+      setSnapLineY(null);
+      return;
+    }
 
-    const x = Math.min(startPos.x, currentPos.x);
-    const y = Math.min(startPos.y, currentPos.y);
-    const width = Math.abs(currentPos.x - startPos.x);
-    const height = Math.abs(currentPos.y - startPos.y);
+    if (isLasso) {
+      setIsLasso(false);
+      // If the lasso was tiny, treat it as a click to clear selection (already handled in mousedown)
+      // But if it was tiny and we want to DRAW, we could switch to drawing mode.
+      // For now, let's just stick to Lasso for empty space.
+      return;
+    }
 
-    if (width > 0.5 && height > 0.5) {
-      onAddField({
-        id: generateId(),
-        page: currentPage,
-        x,
-        y,
-        width,
-        height,
-        variableName: `var_${fields.length + 1}`,
-      });
+    if (isDrawing) {
+      setIsDrawing(false);
+      const x = Math.min(startPos.x, currentPos.x);
+      const y = Math.min(startPos.y, currentPos.y);
+      const width = Math.abs(currentPos.x - startPos.x);
+      const height = Math.abs(currentPos.y - startPos.y);
+
+      if (width > 0.5 && height > 0.5) {
+        onAddField({
+          id: generateId(),
+          page: currentPage,
+          x,
+          y,
+          width,
+          height,
+          variableName: `var_${fields.length + 1}`,
+        });
+      }
     }
   };
 
@@ -157,16 +254,45 @@ function DrawingOverlay({
       onMouseUp={handleMouseUp}
       onMouseLeave={handleMouseUp}
     >
+      <div className="absolute top-2 right-2 flex gap-2 z-30">
+        <button 
+          onClick={(e) => { e.stopPropagation(); setIsDrawing(!isDrawing); setIsLasso(false); }}
+          className={`p-2 rounded-lg shadow-md transition-colors ${isDrawing ? 'bg-indigo-600 text-white' : 'bg-white text-neutral-600 hover:bg-neutral-50'}`}
+          title="Modo Dibujo (Crear nuevos campos)"
+        >
+          <Settings2 className="w-4 h-4" />
+        </button>
+      </div>
+
+      {snapLineY !== null && (
+        <div 
+          className="absolute left-0 right-0 border-t border-dashed border-indigo-500 z-0 pointer-events-none"
+          style={{ top: `${snapLineY}%` }}
+        />
+      )}
+
+      {isLasso && (
+        <div
+          className="absolute border border-indigo-500 bg-indigo-500/10 pointer-events-none z-40"
+          style={{
+            left: `${Math.min(startPos.x, currentPos.x)}%`,
+            top: `${Math.min(startPos.y, currentPos.y)}%`,
+            width: `${Math.abs(currentPos.x - startPos.x)}%`,
+            height: `${Math.abs(currentPos.y - startPos.y)}%`,
+          }}
+        />
+      )}
+
       {fields
         .filter((f) => f.page === currentPage)
         .map((field) => {
-          const isSelected = selectedFieldId === field.id;
+          const isSelected = selectedFieldIds.includes(field.id);
           return (
             <div
               key={field.id}
-              className={`absolute border-2 flex flex-col items-start justify-start overflow-hidden transition-colors ${
+              className={`absolute border-2 flex flex-col items-start justify-start overflow-hidden transition-colors cursor-move ${
                 isSelected
-                  ? 'border-indigo-500 bg-indigo-500/20 z-20 shadow-md'
+                  ? 'border-indigo-500 bg-indigo-500/30 z-20 shadow-md ring-2 ring-indigo-500/20'
                   : 'border-rose-500 bg-rose-500/10 hover:bg-rose-500/20 z-10'
               }`}
               style={{
@@ -177,10 +303,39 @@ function DrawingOverlay({
               }}
               onMouseDown={(e) => {
                 e.stopPropagation();
-                onSelectField(field.id);
+                
+                let nextSelection: string[];
+                if (e.shiftKey || e.ctrlKey || e.metaKey) {
+                  if (isSelected) {
+                    nextSelection = selectedFieldIds.filter(id => id !== field.id);
+                  } else {
+                    nextSelection = [...selectedFieldIds, field.id];
+                  }
+                } else {
+                  if (!isSelected) {
+                    nextSelection = [field.id];
+                  } else {
+                    nextSelection = selectedFieldIds;
+                  }
+                }
+                onSelectFields(nextSelection);
+
+                const fieldsToDrag = fields.filter(f => nextSelection.includes(f.id));
+                setDragState({
+                  startX: e.clientX,
+                  startY: e.clientY,
+                  mainFieldId: field.id,
+                  initialPositions: fieldsToDrag.map(f => ({
+                    id: f.id,
+                    x: f.x,
+                    y: f.y,
+                    width: f.width,
+                    height: f.height
+                  }))
+                });
               }}
             >
-              <div className={`text-[10px] px-1 font-mono truncate max-w-full ${isSelected ? 'bg-indigo-500 text-white' : 'bg-rose-500 text-white'}`}>
+              <div className={`text-[10px] px-1 font-mono truncate w-full pointer-events-none ${isSelected ? 'bg-indigo-500 text-white' : 'bg-rose-500 text-white'}`}>
                 {field.variableName}
               </div>
             </div>
@@ -188,7 +343,7 @@ function DrawingOverlay({
         })}
       {isDrawing && (
         <div
-          className="absolute border-2 border-indigo-500 bg-indigo-500/20 pointer-events-none"
+          className="absolute border-2 border-indigo-500 bg-indigo-500/20 pointer-events-none z-40"
           style={{
             left: `${Math.min(startPos.x, currentPos.x)}%`,
             top: `${Math.min(startPos.y, currentPos.y)}%`,
@@ -207,7 +362,7 @@ export default function App() {
   const [currentPage, setCurrentPage] = useState(1);
   const [numPages, setNumPages] = useState(0);
   const [fields, setFields] = useState<Field[]>([]);
-  const [selectedFieldId, setSelectedFieldId] = useState<string | null>(null);
+  const [selectedFieldIds, setSelectedFieldIds] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [pageDimensions, setPageDimensions] = useState<Record<number, {width: number, height: number}>>({});
 
@@ -228,7 +383,7 @@ export default function App() {
       setNumPages(pdf.numPages);
       setCurrentPage(1);
       setFields([]);
-      setSelectedFieldId(null);
+      setSelectedFieldIds([]);
 
       // Fetch dimensions for all pages at scale 1.0 (standard PDF points)
       const dims: Record<number, {width: number, height: number}> = {};
@@ -260,8 +415,6 @@ export default function App() {
       }
 
       const importedFields: Field[] = jsonData.map((item: any) => {
-        // Support importing both the exported format (with percentageCoordinates) 
-        // and a simple raw format
         if (item.percentageCoordinates) {
           return {
             id: item.id || generateId(),
@@ -273,7 +426,6 @@ export default function App() {
             height: item.percentageCoordinates.height,
           };
         } else {
-          // Fallback if it's an older format or raw format
           return {
             id: item.id || generateId(),
             page: item.page || 1,
@@ -293,7 +445,6 @@ export default function App() {
       alert('Error al leer el archivo JSON. Asegúrate de que sea un archivo válido exportado por esta herramienta.');
     }
     
-    // Reset input so the same file can be selected again
     if (jsonInputRef.current) {
       jsonInputRef.current.value = '';
     }
@@ -302,17 +453,11 @@ export default function App() {
   const handleExport = () => {
     const exportData = fields.map(field => {
       const dim = pageDimensions[field.page];
-      
-      // If dimensions aren't loaded for some reason, fallback to percentages
       if (!dim) return field;
       
-      // Calculate absolute PDF points
-      // PDF standard origin (0,0) is bottom-left. 
-      // X goes left to right. Y goes bottom to top.
       const pdfX = (field.x / 100) * dim.width;
       const pdfW = (field.width / 100) * dim.width;
       const pdfH = (field.height / 100) * dim.height;
-      // field.y is percentage from top. So bottom edge from top is field.y + field.height
       const pdfY = dim.height - ((field.y + field.height) / 100) * dim.height;
 
       return {
@@ -336,13 +481,25 @@ export default function App() {
 
     const dataStr = JSON.stringify(exportData, null, 2);
     const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
-    
-    const exportFileDefaultName = 'pdf-fields.json';
-    
     const linkElement = document.createElement('a');
     linkElement.setAttribute('href', dataUri);
-    linkElement.setAttribute('download', exportFileDefaultName);
+    linkElement.setAttribute('download', 'pdf-fields.json');
     linkElement.click();
+  };
+
+  const syncY = () => {
+    if (selectedFieldIds.length < 2) return;
+    
+    const selectedFields = fields.filter(f => selectedFieldIds.includes(f.id));
+    // Use the Y of the first selected field as the target
+    const targetY = selectedFields[0].y;
+    
+    setFields(fields.map(f => {
+      if (selectedFieldIds.includes(f.id)) {
+        return { ...f, y: targetY };
+      }
+      return f;
+    }));
   };
 
   return (
@@ -374,7 +531,7 @@ export default function App() {
             </button>
           </div>
           
-          <div>
+          <div className="flex gap-2">
             <input
               type="file"
               accept=".json,application/json"
@@ -385,19 +542,42 @@ export default function App() {
             <button
               onClick={() => jsonInputRef.current?.click()}
               disabled={!pdfDocument}
-              className="w-full flex items-center justify-center gap-2 bg-white border border-neutral-300 hover:bg-neutral-50 text-neutral-700 py-2 px-4 rounded-lg transition-colors font-medium text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+              className="flex-1 flex items-center justify-center gap-2 bg-white border border-neutral-300 hover:bg-neutral-50 text-neutral-700 py-2 px-2 rounded-lg transition-colors font-medium text-xs disabled:opacity-50 disabled:cursor-not-allowed"
               title={!pdfDocument ? "Primero carga un PDF" : "Importar campos desde JSON"}
             >
               <FileJson className="w-4 h-4" />
-              Importar JSON
+              Importar
+            </button>
+
+            <button
+              onClick={syncY}
+              disabled={selectedFieldIds.length < 2}
+              className="flex-1 flex items-center justify-center gap-2 bg-white border border-neutral-300 hover:bg-neutral-50 text-neutral-700 py-2 px-2 rounded-lg transition-colors font-medium text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Sincronizar altura (Y) de seleccionados"
+            >
+              <Settings2 className="w-4 h-4" />
+              Sinc. Y
             </button>
           </div>
         </div>
 
         <div className="flex-1 overflow-y-auto p-4">
-          <h3 className="text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-3">
-            Campos ({fields.length})
-          </h3>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-xs font-semibold text-neutral-500 uppercase tracking-wider">
+              Campos ({fields.length})
+            </h3>
+            {selectedFieldIds.length > 0 && (
+              <button 
+                onClick={() => {
+                  setFields(fields.filter(f => !selectedFieldIds.includes(f.id)));
+                  setSelectedFieldIds([]);
+                }}
+                className="text-[10px] text-rose-500 hover:underline font-medium"
+              >
+                Eliminar seleccionados
+              </button>
+            )}
+          </div>
           
           {fields.length === 0 ? (
             <div className="text-sm text-neutral-400 text-center py-8">
@@ -405,76 +585,87 @@ export default function App() {
             </div>
           ) : (
             <div className="space-y-2">
-              {fields.map(field => (
-                <div
-                  key={field.id}
-                  onClick={() => {
-                    setSelectedFieldId(field.id);
-                    if (field.page !== currentPage) {
-                      setCurrentPage(field.page);
-                    }
-                  }}
-                  className={`p-3 rounded-lg border cursor-pointer transition-all ${
-                    selectedFieldId === field.id
-                      ? 'border-indigo-500 bg-indigo-50 shadow-sm'
-                      : 'border-neutral-200 bg-white hover:border-indigo-300'
-                  }`}
-                >
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-medium text-neutral-500 bg-neutral-100 px-2 py-0.5 rounded">
-                      Pág {field.page}
-                    </span>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setFields(fields.filter(f => f.id !== field.id));
-                        if (selectedFieldId === field.id) setSelectedFieldId(null);
-                      }}
-                      className="text-neutral-400 hover:text-rose-500 transition-colors"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                  
-                  {selectedFieldId === field.id ? (
-                    <input
-                      type="text"
-                      value={field.variableName}
-                      onChange={(e) => {
-                        setFields(fields.map(f => 
-                          f.id === field.id ? { ...f, variableName: e.target.value } : f
-                        ));
-                      }}
-                      className="w-full text-sm font-mono border border-indigo-300 rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
-                      autoFocus
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                  ) : (
-                    <div className="text-sm font-mono text-neutral-700 truncate">
-                      {field.variableName}
+              {fields.map(field => {
+                const isSelected = selectedFieldIds.includes(field.id);
+                return (
+                  <div
+                    key={field.id}
+                    onClick={(e) => {
+                      if (e.shiftKey || e.ctrlKey || e.metaKey) {
+                        if (isSelected) {
+                          setSelectedFieldIds(selectedFieldIds.filter(id => id !== field.id));
+                        } else {
+                          setSelectedFieldIds([...selectedFieldIds, field.id]);
+                        }
+                      } else {
+                        setSelectedFieldIds([field.id]);
+                      }
+                      
+                      if (field.page !== currentPage) {
+                        setCurrentPage(field.page);
+                      }
+                    }}
+                    className={`p-3 rounded-lg border cursor-pointer transition-all ${
+                      isSelected
+                        ? 'border-indigo-500 bg-indigo-50 shadow-sm'
+                        : 'border-neutral-200 bg-white hover:border-indigo-300'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-medium text-neutral-500 bg-neutral-100 px-2 py-0.5 rounded">
+                        Pág {field.page}
+                      </span>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setFields(fields.filter(f => f.id !== field.id));
+                          setSelectedFieldIds(selectedFieldIds.filter(id => id !== field.id));
+                        }}
+                        className="text-neutral-400 hover:text-rose-500 transition-colors"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
                     </div>
-                  )}
+                    
+                    {isSelected && selectedFieldIds.length === 1 ? (
+                      <input
+                        type="text"
+                        value={field.variableName}
+                        onChange={(e) => {
+                          setFields(fields.map(f => 
+                            f.id === field.id ? { ...f, variableName: e.target.value } : f
+                          ));
+                        }}
+                        className="w-full text-sm font-mono border border-indigo-300 rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+                        autoFocus
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                    ) : (
+                      <div className="text-sm font-mono text-neutral-700 truncate">
+                        {field.variableName}
+                      </div>
+                    )}
 
-                  {/* Show PDF Coordinates */}
-                  <div className="mt-2 text-[10px] text-neutral-400 font-mono grid grid-cols-2 gap-1">
-                    {pageDimensions[field.page] ? (() => {
-                      const dim = pageDimensions[field.page];
-                      const pdfX = (field.x / 100) * dim.width;
-                      const pdfY = dim.height - ((field.y + field.height) / 100) * dim.height;
-                      const pdfW = (field.width / 100) * dim.width;
-                      const pdfH = (field.height / 100) * dim.height;
-                      return (
-                        <>
-                          <div>x: {pdfX.toFixed(1)}</div>
-                          <div>y: {pdfY.toFixed(1)}</div>
-                          <div>w: {pdfW.toFixed(1)}</div>
-                          <div>h: {pdfH.toFixed(1)}</div>
-                        </>
-                      );
-                    })() : null}
+                    <div className="mt-2 text-[10px] text-neutral-400 font-mono grid grid-cols-2 gap-1">
+                      {pageDimensions[field.page] ? (() => {
+                        const dim = pageDimensions[field.page];
+                        const pdfX = (field.x / 100) * dim.width;
+                        const pdfY = dim.height - ((field.y + field.height) / 100) * dim.height;
+                        const pdfW = (field.width / 100) * dim.width;
+                        const pdfH = (field.height / 100) * dim.height;
+                        return (
+                          <>
+                            <div>x: {pdfX.toFixed(1)}</div>
+                            <div>y: {pdfY.toFixed(1)}</div>
+                            <div>w: {pdfW.toFixed(1)}</div>
+                            <div>h: {pdfH.toFixed(1)}</div>
+                          </>
+                        );
+                      })() : null}
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
@@ -547,12 +738,15 @@ export default function App() {
                 currentPage={currentPage}
                 onAddField={(field) => {
                   setFields([...fields, field]);
-                  setSelectedFieldId(field.id);
+                  setSelectedFieldIds([field.id]);
                 }}
-                selectedFieldId={selectedFieldId}
-                onSelectField={setSelectedFieldId}
-                onUpdateField={(id, updates) => {
-                  setFields(fields.map(f => f.id === id ? { ...f, ...updates } : f));
+                selectedFieldIds={selectedFieldIds}
+                onSelectFields={setSelectedFieldIds}
+                onUpdateFields={(updates) => {
+                  setFields(fields.map(f => {
+                    const update = updates.find(u => u.id === f.id);
+                    return update ? { ...f, ...update } : f;
+                  }));
                 }}
               />
             </div>
