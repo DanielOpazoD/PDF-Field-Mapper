@@ -7,7 +7,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 // @ts-ignore
 import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { Upload, Download, Trash2, ChevronLeft, ChevronRight, FileText, Settings2, FileJson } from 'lucide-react';
+import { Upload, Download, Trash2, ChevronLeft, ChevronRight, FileText, Settings2, FileJson, Hand, Square, MousePointer2, Eraser } from 'lucide-react';
 
 // Set worker path
 // @ts-ignore
@@ -93,8 +93,11 @@ interface DrawingOverlayProps {
   onAddField: (field: Field) => void;
   selectedFieldIds: string[];
   onSelectFields: (ids: string[]) => void;
-  onUpdateFields: (updates: { id: string; x?: number; y?: number }[]) => void;
+  onUpdateFields: (updates: { id: string; x?: number; y?: number; width?: number; height?: number }[]) => void;
+  onDeleteFields: (ids: string[]) => void;
 }
+
+type InteractionMode = 'select' | 'draw' | 'hand';
 
 function DrawingOverlay({
   fields,
@@ -103,8 +106,10 @@ function DrawingOverlay({
   selectedFieldIds,
   onSelectFields,
   onUpdateFields,
+  onDeleteFields,
 }: DrawingOverlayProps) {
   const overlayRef = useRef<HTMLDivElement>(null);
+  const [mode, setMode] = useState<InteractionMode>('select');
   const [isDrawing, setIsDrawing] = useState(false);
   const [isLasso, setIsLasso] = useState(false);
   const [startPos, setStartPos] = useState({ x: 0, y: 0 });
@@ -116,29 +121,74 @@ function DrawingOverlay({
     initialPositions: { id: string; x: number; y: number; width: number; height: number }[];
     mainFieldId: string;
   } | null>(null);
+
+  const [resizeState, setResizeState] = useState<{
+    id: string;
+    handle: string;
+    startX: number;
+    startY: number;
+    initialX: number;
+    initialY: number;
+    initialWidth: number;
+    initialHeight: number;
+  } | null>(null);
+
   const [snapLineY, setSnapLineY] = useState<number | null>(null);
 
   const handleMouseDown = (e: React.MouseEvent) => {
+    if (mode === 'hand') return;
     if (e.target !== overlayRef.current) return;
+    
     const rect = overlayRef.current.getBoundingClientRect();
     const x = ((e.clientX - rect.left) / rect.width) * 100;
     const y = ((e.clientY - rect.top) / rect.height) * 100;
     setStartPos({ x, y });
     setCurrentPos({ x, y });
     
-    // If Shift is held, it's always Lasso. Otherwise, if no field is under, it's Drawing or Lasso.
-    // Let's make it: Click + Drag on empty space = Lasso. 
-    // We'll decide between Drawing and Lasso based on a toggle or just use Lasso as default for empty space drag.
-    // Actually, the user wants to "select multiple", so Lasso is better for empty space.
-    setIsLasso(true);
-    if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
-      onSelectFields([]);
+    if (mode === 'draw') {
+      setIsDrawing(true);
+    } else {
+      setIsLasso(true);
+      if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
+        onSelectFields([]);
+      }
     }
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
     const rect = overlayRef.current?.getBoundingClientRect();
     if (!rect) return;
+
+    if (resizeState) {
+      const deltaX = ((e.clientX - resizeState.startX) / rect.width) * 100;
+      const deltaY = ((e.clientY - resizeState.startY) / rect.height) * 100;
+      
+      let { initialX, initialY, initialWidth, initialHeight } = resizeState;
+      let newX = initialX;
+      let newY = initialY;
+      let newWidth = initialWidth;
+      let newHeight = initialHeight;
+
+      if (resizeState.handle.includes('e')) newWidth = Math.max(0.5, initialWidth + deltaX);
+      if (resizeState.handle.includes('s')) newHeight = Math.max(0.5, initialHeight + deltaY);
+      if (resizeState.handle.includes('w')) {
+        const potentialWidth = initialWidth - deltaX;
+        if (potentialWidth > 0.5) {
+          newWidth = potentialWidth;
+          newX = initialX + deltaX;
+        }
+      }
+      if (resizeState.handle.includes('n')) {
+        const potentialHeight = initialHeight - deltaY;
+        if (potentialHeight > 0.5) {
+          newHeight = potentialHeight;
+          newY = initialY + deltaY;
+        }
+      }
+
+      onUpdateFields([{ id: resizeState.id, x: newX, y: newY, width: newWidth, height: newHeight }]);
+      return;
+    }
 
     if (dragState) {
       const deltaX = ((e.clientX - dragState.startX) / rect.width) * 100;
@@ -186,7 +236,6 @@ function DrawingOverlay({
       setCurrentPos({ x, y });
 
       if (isLasso) {
-        // Update selection in real-time for Lasso
         const lx = Math.min(startPos.x, x);
         const ly = Math.min(startPos.y, y);
         const lw = Math.abs(x - startPos.x);
@@ -195,7 +244,6 @@ function DrawingOverlay({
         const newlySelected = fields
           .filter(f => f.page === currentPage)
           .filter(f => {
-            // Check if field is inside lasso rect
             return (
               f.x >= lx &&
               f.y >= ly &&
@@ -205,26 +253,16 @@ function DrawingOverlay({
           })
           .map(f => f.id);
         
-        // If shift is held, we should probably add to existing selection, but for simplicity let's just set it
         onSelectFields(newlySelected);
       }
     }
   };
 
   const handleMouseUp = () => {
-    if (dragState) {
-      setDragState(null);
-      setSnapLineY(null);
-      return;
-    }
-
-    if (isLasso) {
-      setIsLasso(false);
-      // If the lasso was tiny, treat it as a click to clear selection (already handled in mousedown)
-      // But if it was tiny and we want to DRAW, we could switch to drawing mode.
-      // For now, let's just stick to Lasso for empty space.
-      return;
-    }
+    setDragState(null);
+    setResizeState(null);
+    setSnapLineY(null);
+    setIsLasso(false);
 
     if (isDrawing) {
       setIsDrawing(false);
@@ -250,19 +288,54 @@ function DrawingOverlay({
   return (
     <div
       ref={overlayRef}
-      className="absolute inset-0 cursor-crosshair z-10"
+      className={`absolute inset-0 z-10 ${mode === 'hand' ? 'cursor-grab active:cursor-grabbing' : mode === 'draw' ? 'cursor-crosshair' : 'cursor-default'}`}
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
       onMouseLeave={handleMouseUp}
     >
-      <div className="absolute top-2 right-2 flex gap-2 z-30">
+      {/* Floating Toolbar - Persistent on screen */}
+      <div className="fixed top-20 left-1/2 -translate-x-1/2 flex items-center gap-1 bg-white/90 backdrop-blur border border-neutral-200 p-1.5 rounded-xl shadow-2xl z-[100] ring-1 ring-black/5">
         <button 
-          onClick={(e) => { e.stopPropagation(); setIsDrawing(!isDrawing); setIsLasso(false); }}
-          className={`p-2 rounded-lg shadow-md transition-colors ${isDrawing ? 'bg-indigo-600 text-white' : 'bg-white text-neutral-600 hover:bg-neutral-50'}`}
-          title="Modo Dibujo (Crear nuevos campos)"
+          onClick={() => setMode('hand')}
+          className={`p-2 rounded-lg transition-all ${mode === 'hand' ? 'bg-indigo-600 text-white shadow-inner' : 'text-neutral-600 hover:bg-neutral-100'}`}
+          title="Mano (Desplazar)"
         >
-          <Settings2 className="w-4 h-4" />
+          <Hand className="w-5 h-5" />
+        </button>
+        <button 
+          onClick={() => setMode('select')}
+          className={`p-2 rounded-lg transition-all ${mode === 'select' ? 'bg-indigo-600 text-white shadow-inner' : 'text-neutral-600 hover:bg-neutral-100'}`}
+          title="Selección (Lasso / Mover)"
+        >
+          <MousePointer2 className="w-5 h-5" />
+        </button>
+        <button 
+          onClick={() => setMode('draw')}
+          className={`p-2 rounded-lg transition-all ${mode === 'draw' ? 'bg-indigo-600 text-white shadow-inner' : 'text-neutral-600 hover:bg-neutral-100'}`}
+          title="Dibujar Celda"
+        >
+          <Square className="w-5 h-5" />
+        </button>
+        <div className="w-px h-6 bg-neutral-200 mx-1" />
+        <button 
+          onClick={() => {
+            onDeleteFields(selectedFieldIds);
+            onSelectFields([]);
+          }}
+          disabled={selectedFieldIds.length === 0}
+          className="p-2 rounded-lg text-rose-600 hover:bg-rose-50 disabled:opacity-30 transition-all"
+          title="Eliminar seleccionados"
+        >
+          <Trash2 className="w-5 h-5" />
+        </button>
+        <button 
+          onClick={() => onSelectFields([])}
+          disabled={selectedFieldIds.length === 0}
+          className="p-2 rounded-lg text-neutral-600 hover:bg-neutral-100 disabled:opacity-30 transition-all"
+          title="Deseleccionar todo"
+        >
+          <Eraser className="w-5 h-5" />
         </button>
       </div>
 
@@ -292,11 +365,11 @@ function DrawingOverlay({
           return (
             <div
               key={field.id}
-              className={`absolute border-2 flex flex-col items-start justify-start overflow-hidden transition-colors cursor-move ${
+              className={`absolute border-2 flex flex-col items-start justify-start overflow-visible transition-colors ${
                 isSelected
                   ? 'border-indigo-500 bg-indigo-500/30 z-20 shadow-md ring-2 ring-indigo-500/20'
                   : 'border-rose-500 bg-rose-500/10 hover:bg-rose-500/20 z-10'
-              }`}
+              } ${mode === 'select' ? 'cursor-move' : 'cursor-default'}`}
               style={{
                 left: `${field.x}%`,
                 top: `${field.y}%`,
@@ -304,6 +377,7 @@ function DrawingOverlay({
                 height: `${field.height}%`,
               }}
               onMouseDown={(e) => {
+                if (mode !== 'select') return;
                 e.stopPropagation();
                 
                 let nextSelection: string[];
@@ -337,9 +411,38 @@ function DrawingOverlay({
                 });
               }}
             >
-              <div className={`text-[10px] px-1 font-mono truncate w-full pointer-events-none ${isSelected ? 'bg-indigo-500 text-white' : 'bg-rose-500 text-white'}`}>
+              <div className={`text-[10px] px-1 font-mono truncate w-full pointer-events-none select-none ${isSelected ? 'bg-indigo-500 text-white' : 'bg-rose-500 text-white'}`}>
                 {field.variableName}
               </div>
+
+              {/* Resize Handles - Only for single selection or specific hover */}
+              {isSelected && selectedFieldIds.length === 1 && mode === 'select' && (
+                <>
+                  {['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].map((handle) => (
+                    <div
+                      key={handle}
+                      className={`absolute w-2.5 h-2.5 bg-white border-2 border-indigo-500 rounded-full z-50 hover:scale-125 transition-transform cursor-${handle}-resize`}
+                      style={{
+                        top: handle.includes('n') ? '-5px' : handle.includes('s') ? 'calc(100% - 5px)' : 'calc(50% - 5px)',
+                        left: handle.includes('w') ? '-5px' : handle.includes('e') ? 'calc(100% - 5px)' : 'calc(50% - 5px)',
+                      }}
+                      onMouseDown={(e) => {
+                        e.stopPropagation();
+                        setResizeState({
+                          id: field.id,
+                          handle,
+                          startX: e.clientX,
+                          startY: e.clientY,
+                          initialX: field.x,
+                          initialY: field.y,
+                          initialWidth: field.width,
+                          initialHeight: field.height,
+                        });
+                      }}
+                    />
+                  ))}
+                </>
+              )}
             </div>
           );
         })}
@@ -835,6 +938,9 @@ export default function App() {
                     const update = updates.find(u => u.id === f.id);
                     return update ? { ...f, ...update } : f;
                   }));
+                }}
+                onDeleteFields={(ids) => {
+                  setFields(prevFields => prevFields.filter(f => !ids.includes(f.id)));
                 }}
               />
             </div>
