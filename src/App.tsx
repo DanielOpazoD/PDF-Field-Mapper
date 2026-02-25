@@ -5,10 +5,12 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
+// @ts-ignore
 import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { Upload, Download, Trash2, ChevronLeft, ChevronRight, FileText, Settings2, FileJson } from 'lucide-react';
 
 // Set worker path
+// @ts-ignore
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
 
 const generateId = () => {
@@ -56,7 +58,7 @@ function PdfPageRenderer({ pdfDocument, pageNumber }: PdfPageRendererProps) {
         canvas.height = viewport.height;
         canvas.width = viewport.width;
 
-        const renderContext = {
+        const renderContext: any = {
           canvasContext: context,
           viewport: viewport,
         };
@@ -488,18 +490,80 @@ export default function App() {
   };
 
   const syncY = () => {
-    if (selectedFieldIds.length < 2) return;
+    if (selectedFieldIds.length < 2) {
+      console.log('Sync Y: Not enough fields selected', selectedFieldIds.length);
+      return;
+    }
     
-    const selectedFields = fields.filter(f => selectedFieldIds.includes(f.id));
-    // Use the Y of the first selected field as the target
-    const targetY = selectedFields[0].y;
-    
-    setFields(fields.map(f => {
-      if (selectedFieldIds.includes(f.id)) {
-        return { ...f, y: targetY };
+    setFields(prevFields => {
+      const referenceId = selectedFieldIds[0];
+      const referenceField = prevFields.find(f => f.id === referenceId);
+      
+      if (!referenceField || !pageDimensions[referenceField.page]) {
+        console.warn('Sync Y: Reference field or dimensions not found', referenceId);
+        return prevFields;
       }
-      return f;
-    }));
+
+      const refDim = pageDimensions[referenceField.page];
+      // Top edge in PDF points (from bottom)
+      const refPdfTopY = refDim.height - (referenceField.y / 100) * refDim.height;
+      // Absolute height in points
+      const refPdfHeight = (referenceField.height / 100) * refDim.height;
+
+      console.log(`Syncing Y to Reference: ${referenceField.variableName}, TopY=${refPdfTopY.toFixed(2)}, Height=${refPdfHeight.toFixed(2)}`);
+
+      return prevFields.map(f => {
+        if (selectedFieldIds.includes(f.id)) {
+          const targetDim = pageDimensions[f.page];
+          if (!targetDim) return f;
+
+          // Calculate new percentage values for the target page
+          const newHeightPct = (refPdfHeight / targetDim.height) * 100;
+          const newYPct = ((targetDim.height - refPdfTopY) / targetDim.height) * 100;
+
+          return { ...f, y: newYPct, height: newHeightPct };
+        }
+        return f;
+      });
+    });
+  };
+
+  const syncX = () => {
+    if (selectedFieldIds.length < 2) {
+      console.log('Sync X: Not enough fields selected', selectedFieldIds.length);
+      return;
+    }
+    
+    setFields(prevFields => {
+      const referenceId = selectedFieldIds[0];
+      const referenceField = prevFields.find(f => f.id === referenceId);
+      
+      if (!referenceField || !pageDimensions[referenceField.page]) {
+        console.warn('Sync X: Reference field or dimensions not found', referenceId);
+        return prevFields;
+      }
+
+      const refDim = pageDimensions[referenceField.page];
+      // Left edge in PDF points
+      const refPdfLeftX = (referenceField.x / 100) * refDim.width;
+      // Absolute width in points
+      const refPdfWidth = (referenceField.width / 100) * refDim.width;
+
+      console.log(`Syncing X to Reference: ${referenceField.variableName}, LeftX=${refPdfLeftX.toFixed(2)}, Width=${refPdfWidth.toFixed(2)}`);
+
+      return prevFields.map(f => {
+        if (selectedFieldIds.includes(f.id)) {
+          const targetDim = pageDimensions[f.page];
+          if (!targetDim) return f;
+
+          const newWidthPct = (refPdfWidth / targetDim.width) * 100;
+          const newXPct = (refPdfLeftX / targetDim.width) * 100;
+
+          return { ...f, x: newXPct, width: newWidthPct };
+        }
+        return f;
+      });
+    });
   };
 
   return (
@@ -531,33 +595,57 @@ export default function App() {
             </button>
           </div>
           
-          <div className="flex gap-2">
-            <input
-              type="file"
-              accept=".json,application/json"
-              className="hidden"
-              ref={jsonInputRef}
-              onChange={handleJsonUpload}
-            />
-            <button
-              onClick={() => jsonInputRef.current?.click()}
-              disabled={!pdfDocument}
-              className="flex-1 flex items-center justify-center gap-2 bg-white border border-neutral-300 hover:bg-neutral-50 text-neutral-700 py-2 px-2 rounded-lg transition-colors font-medium text-xs disabled:opacity-50 disabled:cursor-not-allowed"
-              title={!pdfDocument ? "Primero carga un PDF" : "Importar campos desde JSON"}
-            >
-              <FileJson className="w-4 h-4" />
-              Importar
-            </button>
+          <div className="space-y-2">
+            <div className="flex gap-2">
+              <input
+                type="file"
+                accept=".json,application/json"
+                className="hidden"
+                ref={jsonInputRef}
+                onChange={handleJsonUpload}
+              />
+              <button
+                onClick={() => jsonInputRef.current?.click()}
+                disabled={!pdfDocument}
+                className="flex-1 flex items-center justify-center gap-2 bg-white border border-neutral-300 hover:bg-neutral-50 text-neutral-700 py-2 px-2 rounded-lg transition-colors font-medium text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+                title={!pdfDocument ? "Primero carga un PDF" : "Importar campos desde JSON"}
+              >
+                <FileJson className="w-4 h-4" />
+                Importar
+              </button>
+              
+              {selectedFieldIds.length > 0 && (
+                <button
+                  onClick={() => setSelectedFieldIds([])}
+                  className="px-3 bg-white border border-neutral-300 hover:bg-neutral-50 text-neutral-500 rounded-lg transition-colors text-[10px] font-medium"
+                  title="Limpiar selección"
+                >
+                  Limpiar
+                </button>
+              )}
+            </div>
 
-            <button
-              onClick={syncY}
-              disabled={selectedFieldIds.length < 2}
-              className="flex-1 flex items-center justify-center gap-2 bg-white border border-neutral-300 hover:bg-neutral-50 text-neutral-700 py-2 px-2 rounded-lg transition-colors font-medium text-xs disabled:opacity-50 disabled:cursor-not-allowed"
-              title="Sincronizar altura (Y) de seleccionados"
-            >
-              <Settings2 className="w-4 h-4" />
-              Sinc. Y
-            </button>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                onClick={syncY}
+                disabled={selectedFieldIds.length < 2}
+                className="flex items-center justify-center gap-2 bg-indigo-50 border border-indigo-200 hover:bg-indigo-100 text-indigo-700 py-2 px-2 rounded-lg transition-colors font-medium text-[10px] disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+                title="Sincronizar altura (Y) de seleccionados"
+              >
+                <ChevronRight className="w-3 h-3 rotate-90" />
+                Sinc. Y
+              </button>
+
+              <button
+                onClick={syncX}
+                disabled={selectedFieldIds.length < 2}
+                className="flex items-center justify-center gap-2 bg-indigo-50 border border-indigo-200 hover:bg-indigo-100 text-indigo-700 py-2 px-2 rounded-lg transition-colors font-medium text-[10px] disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+                title="Sincronizar posición (X) de seleccionados"
+              >
+                <ChevronRight className="w-3 h-3" />
+                Sinc. X
+              </button>
+            </div>
           </div>
         </div>
 
@@ -743,7 +831,7 @@ export default function App() {
                 selectedFieldIds={selectedFieldIds}
                 onSelectFields={setSelectedFieldIds}
                 onUpdateFields={(updates) => {
-                  setFields(fields.map(f => {
+                  setFields(prevFields => prevFields.map(f => {
                     const update = updates.find(u => u.id === f.id);
                     return update ? { ...f, ...update } : f;
                   }));
