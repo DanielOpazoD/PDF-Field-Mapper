@@ -7,7 +7,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 // @ts-ignore
 import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { Upload, Download, Trash2, ChevronLeft, ChevronRight, FileText, Settings2, FileJson, Hand, Square, MousePointer2, Eraser } from 'lucide-react';
+import { Upload, Download, Trash2, ChevronLeft, ChevronRight, FileText, Settings2, FileJson, Hand, Square, MousePointer2, Eraser, ZoomIn, ZoomOut, Maximize } from 'lucide-react';
 
 // Set worker path
 // @ts-ignore
@@ -33,9 +33,10 @@ interface Field {
 interface PdfPageRendererProps {
   pdfDocument: pdfjsLib.PDFDocumentProxy;
   pageNumber: number;
+  scale: number;
 }
 
-function PdfPageRenderer({ pdfDocument, pageNumber }: PdfPageRendererProps) {
+function PdfPageRenderer({ pdfDocument, pageNumber, scale }: PdfPageRendererProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -49,7 +50,7 @@ function PdfPageRenderer({ pdfDocument, pageNumber }: PdfPageRendererProps) {
         const page = await pdfDocument.getPage(pageNumber);
         if (!isMounted) return;
 
-        const viewport = page.getViewport({ scale: 1.5 });
+        const viewport = page.getViewport({ scale });
         const canvas = canvasRef.current;
         const context = canvas.getContext('2d');
         
@@ -82,7 +83,7 @@ function PdfPageRenderer({ pdfDocument, pageNumber }: PdfPageRendererProps) {
         renderTask.cancel();
       }
     };
-  }, [pdfDocument, pageNumber]);
+  }, [pdfDocument, pageNumber, scale]);
 
   return <canvas ref={canvasRef} className="block w-full h-auto" />;
 }
@@ -95,6 +96,8 @@ interface DrawingOverlayProps {
   onSelectFields: (ids: string[]) => void;
   onUpdateFields: (updates: { id: string; x?: number; y?: number; width?: number; height?: number }[]) => void;
   onDeleteFields: (ids: string[]) => void;
+  zoom: number;
+  onZoom: (newZoom: number) => void;
 }
 
 type InteractionMode = 'select' | 'draw' | 'hand';
@@ -107,6 +110,8 @@ function DrawingOverlay({
   onSelectFields,
   onUpdateFields,
   onDeleteFields,
+  zoom,
+  onZoom,
 }: DrawingOverlayProps) {
   const overlayRef = useRef<HTMLDivElement>(null);
   const [mode, setMode] = useState<InteractionMode>('select');
@@ -318,6 +323,34 @@ function DrawingOverlay({
           <Square className="w-5 h-5" />
         </button>
         <div className="w-px h-6 bg-neutral-200 mx-1" />
+        
+        {/* Zoom Controls */}
+        <button 
+          onClick={() => onZoom(Math.max(0.5, zoom - 0.25))}
+          className="p-2 rounded-lg text-neutral-600 hover:bg-neutral-100 transition-all"
+          title="Alejar"
+        >
+          <ZoomOut className="w-5 h-5" />
+        </button>
+        <span className="text-[10px] font-mono font-bold text-neutral-500 min-w-[3rem] text-center">
+          {Math.round(zoom * 100)}%
+        </span>
+        <button 
+          onClick={() => onZoom(Math.min(4, zoom + 0.25))}
+          className="p-2 rounded-lg text-neutral-600 hover:bg-neutral-100 transition-all"
+          title="Acercar"
+        >
+          <ZoomIn className="w-5 h-5" />
+        </button>
+        <button 
+          onClick={() => onZoom(1.5)}
+          className="p-2 rounded-lg text-neutral-600 hover:bg-neutral-100 transition-all"
+          title="Restablecer Zoom"
+        >
+          <Maximize className="w-5 h-5" />
+        </button>
+
+        <div className="w-px h-6 bg-neutral-200 mx-1" />
         <button 
           onClick={() => {
             onDeleteFields(selectedFieldIds);
@@ -469,6 +502,7 @@ export default function App() {
   const [fields, setFields] = useState<Field[]>([]);
   const [selectedFieldIds, setSelectedFieldIds] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [zoom, setZoom] = useState(1.5);
   const [pageDimensions, setPageDimensions] = useState<Record<number, {width: number, height: number}>>({});
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -923,7 +957,7 @@ export default function App() {
             </div>
           ) : (
             <div className="relative inline-block bg-white shadow-xl ring-1 ring-neutral-200">
-              <PdfPageRenderer pdfDocument={pdfDocument} pageNumber={currentPage} />
+              <PdfPageRenderer pdfDocument={pdfDocument} pageNumber={currentPage} scale={zoom} />
               <DrawingOverlay
                 fields={fields}
                 currentPage={currentPage}
@@ -942,6 +976,8 @@ export default function App() {
                 onDeleteFields={(ids) => {
                   setFields(prevFields => prevFields.filter(f => !ids.includes(f.id)));
                 }}
+                zoom={zoom}
+                onZoom={setZoom}
               />
             </div>
           )}
