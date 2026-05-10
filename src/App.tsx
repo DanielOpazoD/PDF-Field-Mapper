@@ -7,7 +7,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 // @ts-ignore
 import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { Upload, Download, Trash2, ChevronLeft, ChevronRight, FileText, Settings2, FileJson, Hand, Square, MousePointer2, Eraser, ZoomIn, ZoomOut, Maximize } from 'lucide-react';
+import { PDFDocument } from 'pdf-lib';
+import { Upload, Download, Trash2, ChevronLeft, ChevronRight, FileText, Settings2, FileJson, Hand, Square, MousePointer2, Eraser, ZoomIn, ZoomOut, Maximize, FileMinus } from 'lucide-react';
 
 // Set worker path
 // @ts-ignore
@@ -496,6 +497,7 @@ function DrawingOverlay({
 
 export default function App() {
   const [pdfFile, setPdfFile] = useState<File | null>(null);
+  const [pdfBytes, setPdfBytes] = useState<Uint8Array | null>(null);
   const [pdfDocument, setPdfDocument] = useState<pdfjsLib.PDFDocumentProxy | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [numPages, setNumPages] = useState(0);
@@ -516,7 +518,10 @@ export default function App() {
     setPdfFile(file);
     try {
       const arrayBuffer = await file.arrayBuffer();
-      const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+      const bytes = new Uint8Array(arrayBuffer);
+      setPdfBytes(bytes);
+      
+      const loadingTask = pdfjsLib.getDocument({ data: bytes });
       const pdf = await loadingTask.promise;
       setPdfDocument(pdf);
       setNumPages(pdf.numPages);
@@ -701,6 +706,74 @@ export default function App() {
         return f;
       });
     });
+  };
+
+  const handleDeletePage = async () => {
+    if (!pdfBytes || numPages <= 1) return;
+    
+    const confirmDelete = window.confirm(`¿Estás seguro de que quieres eliminar la página ${currentPage}? Esta acción no se puede deshacer y eliminará todos los campos en esta página.`);
+    if (!confirmDelete) return;
+
+    setIsLoading(true);
+    try {
+      const pdfDoc = await PDFDocument.load(pdfBytes);
+      pdfDoc.removePage(currentPage - 1);
+      const newBytes = await pdfDoc.save();
+      setPdfBytes(newBytes);
+
+      // Refresh pdfjs document
+      const loadingTask = pdfjsLib.getDocument({ data: newBytes });
+      const pdf = await loadingTask.promise;
+      setPdfDocument(pdf);
+      
+      // Update fields
+      const updatedFields = fields
+        .filter(f => f.page !== currentPage)
+        .map(f => {
+          if (f.page > currentPage) {
+            return { ...f, page: f.page - 1 };
+          }
+          return f;
+        });
+      setFields(updatedFields);
+
+      // Update page dimensions
+      const dims: Record<number, {width: number, height: number}> = {};
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const page = await pdf.getPage(i);
+        const viewport = page.getViewport({ scale: 1.0 });
+        dims[i] = { width: viewport.width, height: viewport.height };
+      }
+      setPageDimensions(dims);
+
+      const oldNumPages = numPages;
+      setNumPages(pdf.numPages);
+      
+      if (currentPage >= oldNumPages) {
+        setCurrentPage(Math.max(1, pdf.numPages));
+      }
+
+      alert(`Página ${currentPage} eliminada exitosamente.`);
+    } catch (error) {
+      console.error('Error deleting page:', error);
+      alert('Error al eliminar la página.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleDownloadPdf = async () => {
+    if (!pdfBytes) return;
+    
+    const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = pdfFile ? `modificado_${pdfFile.name}` : 'documento_modificado.pdf';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   return (
@@ -895,13 +968,21 @@ export default function App() {
           )}
         </div>
 
-        <div className="p-4 border-t border-neutral-200 bg-neutral-50">
+        <div className="p-4 border-t border-neutral-200 bg-neutral-50 space-y-2">
+          <button
+            onClick={handleDownloadPdf}
+            disabled={!pdfDocument}
+            className="w-full flex items-center justify-center gap-2 bg-white border border-neutral-300 hover:bg-neutral-50 text-indigo-600 py-2 px-4 rounded-lg transition-colors font-medium text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Download className="w-4 h-4" />
+            Descargar PDF
+          </button>
           <button
             onClick={handleExport}
             disabled={fields.length === 0}
-            className="w-full flex items-center justify-center gap-2 bg-white border border-neutral-300 hover:bg-neutral-50 text-neutral-700 py-2 px-4 rounded-lg transition-colors font-medium text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+            className="w-full flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white py-2 px-4 rounded-lg transition-colors font-medium text-sm disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <Download className="w-4 h-4" />
+            <FileJson className="w-4 h-4" />
             Exportar JSON
           </button>
         </div>
@@ -932,6 +1013,18 @@ export default function App() {
                   <ChevronRight className="w-4 h-4" />
                 </button>
               </div>
+            )}
+            
+            {pdfDocument && (
+              <button
+                onClick={handleDeletePage}
+                disabled={numPages <= 1}
+                className="flex items-center gap-2 text-rose-500 hover:bg-rose-50 px-3 py-1.5 rounded-lg transition-colors text-sm font-medium disabled:opacity-30"
+                title="Eliminar página actual"
+              >
+                <FileMinus className="w-4 h-4" />
+                <span>Eliminar Página</span>
+              </button>
             )}
           </div>
           <div className="text-sm text-neutral-500">
